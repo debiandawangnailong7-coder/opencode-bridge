@@ -46,7 +46,10 @@ try {
   if (exitCode === 0) {
     exitCode = await runTest("failure-test.mjs", []);
   } else {
-    console.error("Skipping failure tests because protocol tests failed.");
+    console.error("Skipping failure and relay tests because protocol tests failed.");
+  }
+  if (exitCode === 0) {
+    exitCode = await runTest("relay-test.mjs", []);
   }
   process.exitCode = exitCode;
 } catch (error) {

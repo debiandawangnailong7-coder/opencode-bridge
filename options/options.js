@@ -25,6 +25,7 @@ async function init() {
   $("extensionId").textContent = chrome.runtime.id;
   $("apiKey").value = "";
   updateKeyPlaceholder();
+  showTransportInfo();
 
   $("provider").addEventListener("change", updateCustomRow);
   $("showKey").addEventListener("change", () => {
@@ -43,6 +44,18 @@ function updateCustomRow() {
   const custom = $("provider").value === "custom";
   $("customRow").hidden = !custom;
   $("customBaseUrl").required = custom;
+}
+
+function showTransportInfo() {
+  const ua = navigator.userAgent || "";
+  const isSafari = /Safari\//.test(ua)
+    && !/(Chrome|Chromium|CriOS|Edg|OPR|Firefox|FxiOS)\//.test(ua);
+
+  $("transportStatus").textContent = isSafari
+    ? "Safari detected. Web pages use the content-script relay; direct page connections are currently unreliable in Safari."
+    : "Direct page connections are available. The content-script relay is used automatically when a direct connection cannot complete.";
+
+  $("safariNote").hidden = !isSafari;
 }
 
 function updateKeyPlaceholder() {

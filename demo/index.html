@@ -25,8 +25,12 @@
         <div class="grid two">
           <label class="field">
             <span>Extension ID</span>
-            <input id="extensionId" type="text" placeholder="Paste the ID from chrome://extensions" autocomplete="off" spellcheck="false">
+            <input id="extensionId" type="text" placeholder="Paste the ID from the extension options page" autocomplete="off" spellcheck="false">
             <small>Add this page's exact origin in the extension options first.</small>
+            <small id="transportInfo">
+              Safari: paste the bundle ID from the extension's options page and
+              allow this site under Settings → Extensions → Website Access.
+            </small>
           </label>
           <label class="field">
             <span>Model</span>

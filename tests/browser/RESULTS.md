@@ -72,6 +72,16 @@ offscreen document with a controllable mock:
 
 ## Not verified in this environment
 
+### Content-script relay path
+
+`tests/browser/relay-test.mjs` serves the page and SDK from a local HTTP server
+so the manifest content script is injected, then forces `transport: "relay"`.
+In this sandbox Chromium blocks renderer navigation (including to `127.0.0.1`),
+so the test prints `SKIP` and exits 0; it is wired into `run-all.mjs` and runs
+automatically where renderer navigation works. Node tests
+(`tests/sdk-transport.test.js`) cover transport selection, the direct-to-relay
+fallback, envelope direction/origin checks, and close/listener cleanup.
+
 ### Real outbound network / real OpenCode API
 
 The sandbox's Chromium network path is blocked before normal renderer and

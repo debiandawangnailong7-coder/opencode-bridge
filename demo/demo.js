@@ -77,6 +77,13 @@ function resetBridge() {
   setBadge("not connected", false);
 }
 
+function showTransport() {
+  if (!bridge?.transport) return;
+  $("transportInfo").textContent = bridge.transport === "relay"
+    ? "Connected through the content-script relay."
+    : "Connected through a direct page-to-extension port.";
+}
+
 function resetConversation() {
   try {
     const { bridge: b } = getBridge();
@@ -178,6 +185,7 @@ async function send() {
 
       setStatus("Done.");
       setBadge("connected", true);
+      showTransport();
     } else {
       const response = api === "chat"
         ? await currentConversation.chat.completions.create(body, { signal: controller.signal })
@@ -190,6 +198,7 @@ async function send() {
       showUsage(response.json);
       setStatus(`HTTP ${response.status}`);
       setBadge("connected", true);
+      showTransport();
     }
   } catch (error) {
     if (error?.code === "ABORTED") {
@@ -322,6 +331,7 @@ async function listModels() {
       : JSON.stringify(value, null, 2);
     setStatus(`HTTP ${response.status}`);
     setBadge("connected", true);
+    showTransport();
   } catch (error) {
     setStatus(`${error?.code || "ERROR"} — ${error?.message || String(error)}`, true);
     setBadge("error", false);

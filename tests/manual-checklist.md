@@ -98,12 +98,43 @@ Open `http://localhost:8000/demo/` and `chrome://extensions` in Chrome.
 - [ ] A page cannot read the API key through messages or errors.
 - [ ] The options page does not render the stored key.
 - [ ] Extension logs contain no prompts, responses, or API keys.
-- [ ] `chrome.storage.local.setAccessLevel` is called; no content script can
-      read the key.
+- [ ] `chrome.storage.local.setAccessLevel` is called; the content-script relay
+      cannot read the key. The relay source contains no storage access.
 - [ ] DNR User-Agent rule uses `requestDomains: [host]` + `tabIds: [-1]`; it
       applies to non-tab extension/offscreen requests and does not alter the
       user's own `opencode.ai` tab requests. It is not a strict
       extension-initiator-only filter (verify with a mock server or DevTools).
+
+## Transport selection
+
+- [ ] Chrome, allowed origin: `bridge.transport === "direct"` and behavior is
+      unchanged.
+- [ ] Chrome, forced `transport: "relay"` on an allowed origin: stream,
+      non-stream, cancel, and `ORIGIN_DENIED` for a non-allowed origin all work.
+- [ ] Chrome, forced `transport: "relay"` with the content script unavailable
+      (e.g. extension disabled for the site): fails with
+      `CONTENT_SCRIPT_MISSING` and a Website Access hint.
+
+## Safari
+
+- [ ] `xcrun safari-web-extension-converter` produces a runnable app; the
+      extension appears in Safari settings.
+- [ ] Developer build requires Develop → Allow Unsigned Extensions; the
+      extension loads.
+- [ ] Options page shows a bundle-ID Extension ID (e.g. `com.…`) and the Safari
+      transport/Website Access note.
+- [ ] Without Website Access for the site: the SDK fails with
+      `CONTENT_SCRIPT_MISSING` and the hint, not a hang.
+- [ ] With Website Access for `http://localhost:8000`: the demo connects,
+      `bridge.transport === "relay"`, and streaming text renders.
+- [ ] Non-allowlisted origin through the relay returns `ORIGIN_DENIED`.
+- [ ] Cancel mid-stream aborts through the relay.
+- [ ] A stream of at least 2 minutes completes, or fails clearly with
+      `SW_DISCONNECTED` / `RELAY_CLOSED`; it does not hang.
+- [ ] No offscreen document is used; requests still run through the service
+      worker (25 s first-byte / 5 min request limits).
+- [ ] Check whether Safari applies the DNR User-Agent rule; if not, verify
+      whether the default UA is sent (capture with a mock server or proxy).
 
 ## Policy documentation
 

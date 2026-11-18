@@ -8,12 +8,22 @@
 //   const conversation = bridge.createConversation();
 //   const stream = await conversation.chat.completions.create({ ... }, { signal });
 //   for await (const chunk of stream) { ... }
+//
+// Transport selection:
+//   "auto" (default) tries a direct page-to-extension port first (Chrome and
+//   some Safari versions) and falls back to a content-script relay over
+//   window.postMessage. "direct" and "relay" force one path; the negotiated
+//   path is exposed as `bridge.transport`.
 
 const PROTOCOL_VERSION = 1;
 const DEFAULT_PORT_NAME = "opencode-bridge";
 const DEFAULT_HELLO_TIMEOUT_MS = 5000;
+const DEFAULT_DIRECT_PROBE_TIMEOUT_MS = 1500;
+const DEFAULT_RELAY_PROBE_TIMEOUT_MS = 600;
 const HEARTBEAT_MS = 20000;
 const SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+const RELAY_ENVELOPE_VERSION = 1;
+const RELAY_MARKER = "__opencodeBridge";
 
 export class OpenCodeBridgeError extends Error {
   constructor(code, message, details = {}) {
@@ -261,12 +271,32 @@ export class OpenCodeBridge {
     this.portName = options.portName || DEFAULT_PORT_NAME;
     this.helloTimeoutMs = Number(options.helloTimeoutMs) || DEFAULT_HELLO_TIMEOUT_MS;
 
+    const requestedTransport = options.transport || "auto";
+    if (requestedTransport !== "auto" && requestedTransport !== "direct" && requestedTransport !== "relay") {
+      throw new OpenCodeBridgeError(
+        "BAD_TRANSPORT",
+        'transport must be "auto", "direct", or "relay".'
+      );
+    }
+    this._requestedTransport = requestedTransport;
+    this._activeTransport = null;
+    this._connectPromise = null;
+    this.directProbeTimeoutMs = Math.min(
+      Number(options.directProbeTimeoutMs) || DEFAULT_DIRECT_PROBE_TIMEOUT_MS,
+      this.helloTimeoutMs
+    );
+    this.relayProbeTimeoutMs = Number(options.relayProbeTimeoutMs) || DEFAULT_RELAY_PROBE_TIMEOUT_MS;
+
     this._port = null;
     this._ready = null;
     this._hello = null;
     this._pending = new Map();
     this._heartbeat = null;
     this._closed = false;
+  }
+
+  get transport() {
+    return this._activeTransport;
   }
 
   async connect() {
@@ -315,23 +345,268 @@ export class OpenCodeBridge {
     if (this._port) {
       return this._ready;
     }
+    if (!this._connectPromise) {
+      this._connectPromise = this._connectTransport().finally(() => {
+        this._connectPromise = null;
+      });
+    }
+    return this._connectPromise;
+  }
 
-    const runtime = globalThis.chrome?.runtime;
-    if (!runtime?.connect) {
-      return Promise.reject(new OpenCodeBridgeError(
-        "NO_CHROME_RUNTIME",
-        "chrome.runtime.connect is not available. Open this page in Chrome and add its exact origin in the extension options."
-      ));
+  async _connectTransport() {
+    const requested = this._requestedTransport;
+
+    if (requested === "direct") {
+      return this._adoptPort(this._createDirectPort(), "direct");
     }
 
-    let port;
+    if (requested === "relay") {
+      const relayPort = await this._createRelayPort();
+      return this._adoptPort(relayPort, "relay", this.helloTimeoutMs, null);
+    }
+
+    // "auto": prefer the direct port and fall back to the content-script relay
+    // when the browser cannot complete the direct handshake (Safari web pages).
+    if (getRuntime()) {
+      try {
+        const directPort = this._createDirectPort();
+        return await this._adoptPort(directPort, "direct", this.directProbeTimeoutMs);
+      } catch (error) {
+        if (!isDirectProbeFailure(error)) {
+          throw error;
+        }
+      }
+    }
+
+    const relayPort = await this._createRelayPort();
+    return this._adoptPort(relayPort, "relay", this.helloTimeoutMs, null);
+  }
+
+  _createDirectPort(runtime = getRuntime()) {
+    if (!runtime || typeof runtime.connect !== "function") {
+      throw new OpenCodeBridgeError(
+        "NO_CHROME_RUNTIME",
+        "Neither chrome.runtime nor browser.runtime is available on this page.",
+        {
+          hint: "Safari pages reach the extension through a content script, not chrome.runtime. Make sure the extension is enabled for this site and reload the page."
+        }
+      );
+    }
+
     try {
-      port = runtime.connect(this.extensionId, { name: this.portName });
+      return runtime.connect(this.extensionId, { name: this.portName });
     } catch (error) {
-      return Promise.reject(new OpenCodeBridgeError(
+      throw new OpenCodeBridgeError(
         "CONNECT_FAILED",
-        error?.message || "Could not connect to the extension."
-      ));
+        error?.message || "Could not connect to the extension.",
+        {
+          hint: "Check that the extension is enabled and this page's exact origin is added in the extension options."
+        }
+      );
+    }
+  }
+
+  async _createRelayPort() {
+    const win = globalThis.window;
+    if (!win || typeof win.postMessage !== "function" || typeof win.addEventListener !== "function") {
+      throw new OpenCodeBridgeError(
+        "NO_BRIDGE_TRANSPORT",
+        "This page has no direct extension runtime and no window to use the content-script relay.",
+        {
+          hint: "Open this page in Chrome or Safari with the extension installed."
+        }
+      );
+    }
+
+    await this._probeRelay(win);
+
+    const portId = createId("prt_");
+    const pageOrigin = relayPageOrigin();
+    let seq = 0;
+    let closed = false;
+    const messageListeners = [];
+    const disconnectListeners = [];
+    // Messages can arrive before _adoptPort attaches its listeners (the relay
+    // handshake is fast). Buffer them until a listener is registered.
+    const pendingMessages = [];
+
+    const deliver = (payload) => {
+      if (!messageListeners.length) {
+        pendingMessages.push(payload);
+        return;
+      }
+      for (const listener of messageListeners) {
+        try {
+          listener(payload);
+        } catch {
+          // Ignore listener failures; the port still works.
+        }
+      }
+    };
+
+    const onMessage = (event) => {
+      if (!isRelayEventFromPage(event, win, pageOrigin)) return;
+      const data = event.data;
+      if (data.portId !== portId) return;
+
+      if (data.kind === "msg") {
+        deliver(data.payload);
+      } else if (data.kind === "close") {
+        close();
+      }
+    };
+
+    const cleanup = () => {
+      try {
+        win.removeEventListener("message", onMessage);
+      } catch {
+        // Ignore; the window may be gone.
+      }
+    };
+
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      cleanup();
+      for (const listener of disconnectListeners) {
+        try {
+          listener();
+        } catch {
+          // Ignore.
+        }
+      }
+    };
+
+    const send = (kind, payload) => {
+      if (closed) return;
+      seq += 1;
+      try {
+        win.postMessage(
+          {
+            [RELAY_MARKER]: RELAY_ENVELOPE_VERSION,
+            source: "page",
+            kind,
+            portId,
+            seq,
+            payload
+          },
+          pageOrigin || "*"
+        );
+      } catch {
+        // postMessage may throw while the window is being torn down.
+      }
+    };
+
+    win.addEventListener("message", onMessage);
+
+    const port = {
+      postMessage(message) {
+        send("msg", message);
+      },
+      disconnect() {
+        if (closed) return;
+        send("close", null);
+        close();
+      },
+      onMessage: {
+        addListener(listener) {
+          if (typeof listener !== "function") return;
+          messageListeners.push(listener);
+          while (pendingMessages.length) {
+            const payload = pendingMessages.shift();
+            try {
+              listener(payload);
+            } catch {
+              // Ignore listener failures; the port still works.
+            }
+          }
+        }
+      },
+      onDisconnect: {
+        addListener(listener) {
+          if (typeof listener !== "function") return;
+          disconnectListeners.push(listener);
+          if (closed) {
+            try {
+              listener();
+            } catch {
+              // Ignore.
+            }
+          }
+        }
+      }
+    };
+
+    // The content script forwards this payload to the service worker as the
+    // first message on its internal port.
+    send("open", { type: "hello", protocolVersion: PROTOCOL_VERSION });
+    return port;
+  }
+
+  _probeRelay(win) {
+    return new Promise((resolve, reject) => {
+      const nonce = createId("probe_");
+      const pageOrigin = relayPageOrigin();
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        try {
+          win.removeEventListener("message", listener);
+        } catch {
+          // Ignore.
+        }
+      };
+
+      const listener = (event) => {
+        if (!isRelayEventFromPage(event, win, pageOrigin)) return;
+        if (event.data.kind !== "probe-ack" || event.data.nonce !== nonce) return;
+        cleanup();
+        resolve();
+      };
+
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new OpenCodeBridgeError(
+          "CONTENT_SCRIPT_MISSING",
+          "The extension's content-script relay did not respond on this page.",
+          {
+            hint: "Enable the extension for this site (Safari: Settings → Extensions → Website Access), then reload the page."
+          }
+        ));
+      }, this.relayProbeTimeoutMs);
+
+      win.addEventListener("message", listener);
+      try {
+        win.postMessage(
+          {
+            [RELAY_MARKER]: RELAY_ENVELOPE_VERSION,
+            source: "page",
+            kind: "probe",
+            nonce
+          },
+          pageOrigin || "*"
+        );
+      } catch (error) {
+        cleanup();
+        reject(new OpenCodeBridgeError(
+          "NO_BRIDGE_TRANSPORT",
+          error?.message || "Could not send the content-script relay probe.",
+          {
+            hint: "Reload the page and make sure the extension is enabled for this site."
+          }
+        ));
+      }
+    });
+  }
+
+  _adoptPort(port, label, timeoutMs = this.helloTimeoutMs, initialMessage = { type: "hello", protocolVersion: PROTOCOL_VERSION }) {
+    if (this._closed) {
+      try {
+        port.disconnect();
+      } catch {
+        // Ignore.
+      }
+      return Promise.reject(new OpenCodeBridgeError("CLOSED", "Bridge was closed."));
     }
 
     this._port = port;
@@ -343,18 +618,26 @@ export class OpenCodeBridge {
         } catch {
           // Ignore.
         }
-        this._port = null;
-        this._ready = null;
+        if (this._port === port) {
+          this._port = null;
+          this._ready = null;
+        }
         reject(new OpenCodeBridgeError(
           "HELLO_TIMEOUT",
-          "The extension did not respond. Is it installed and enabled?"
+          "The extension did not respond. Is it installed and enabled?",
+          label === "direct"
+            ? {
+                hint: "Safari may not allow direct page-to-extension connections; the SDK retries through the content-script relay automatically."
+              }
+            : undefined
         ));
-      }, this.helloTimeoutMs);
+      }, timeoutMs);
 
       this._hello = {
         resolve: (message) => {
           clearTimeout(timer);
           this._hello = null;
+          this._activeTransport = label;
           resolve(message);
         },
         reject: (error) => {
@@ -368,29 +651,38 @@ export class OpenCodeBridge {
     port.onMessage.addListener((message) => this._dispatch(message));
     port.onDisconnect.addListener(() => {
       const error = new OpenCodeBridgeError(
-        "SW_DISCONNECTED",
-        "The extension service worker disconnected. The request was not resumed."
+        label === "relay" ? "RELAY_CLOSED" : "SW_DISCONNECTED",
+        label === "relay"
+          ? "The content-script relay closed the connection. The request was not resumed."
+          : "The extension service worker disconnected. The request was not resumed."
       );
-      this._port = null;
-      this._ready = null;
+      if (this._port === port) {
+        this._port = null;
+        this._ready = null;
+      }
       this._hello?.reject(error);
       this._hello = null;
       this._failAll(error);
     });
 
-    try {
-      port.postMessage({ type: "hello", protocolVersion: PROTOCOL_VERSION });
-    } catch (error) {
-      this._hello?.reject(new OpenCodeBridgeError(
-        "CONNECT_FAILED",
-        error?.message || "Could not send hello to the extension."
-      ));
-      this._port = null;
-      this._ready = null;
+    if (initialMessage) {
       try {
-        port.disconnect();
-      } catch {
-        // Ignore.
+        port.postMessage(initialMessage);
+      } catch (error) {
+        this._hello?.reject(new OpenCodeBridgeError(
+          "CONNECT_FAILED",
+          error?.message || "Could not send hello to the extension."
+        ));
+        this._hello = null;
+        if (this._port === port) {
+          this._port = null;
+          this._ready = null;
+        }
+        try {
+          port.disconnect();
+        } catch {
+          // Ignore.
+        }
       }
     }
 
@@ -753,6 +1045,38 @@ function createId(prefix) {
   const bytes = new Uint8Array(16);
   globalThis.crypto.getRandomValues(bytes);
   return `${prefix}${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function getRuntime() {
+  const candidates = [globalThis.chrome?.runtime, globalThis.browser?.runtime];
+  for (const runtime of candidates) {
+    if (runtime && typeof runtime.connect === "function") {
+      return runtime;
+    }
+  }
+  return null;
+}
+
+function isDirectProbeFailure(error) {
+  if (!error) return false;
+  return error.code === "HELLO_TIMEOUT"
+    || error.code === "CONNECT_FAILED"
+    || error.code === "NO_CHROME_RUNTIME";
+}
+
+function relayPageOrigin() {
+  const origin = globalThis.location?.origin;
+  return typeof origin === "string" ? origin : "";
+}
+
+function isRelayEventFromPage(event, win, pageOrigin) {
+  if (!event || event.source !== win) return false;
+  if (pageOrigin && event.origin !== pageOrigin) return false;
+  const data = event.data;
+  if (!data || typeof data !== "object") return false;
+  if (data[RELAY_MARKER] !== RELAY_ENVELOPE_VERSION) return false;
+  // Ignore the SDK's own outgoing envelopes echoed back by the same window.
+  return data.source === "relay";
 }
 
 function bridgeError(payload) {

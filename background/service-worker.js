@@ -13,6 +13,7 @@ import {
 
 const PROTOCOL_VERSION = 1;
 const PORT_NAME = "opencode-bridge";
+const RELAY_PORT_NAME = "opencode-bridge-relay";
 const KEEPALIVE_ALARM = "opencode-bridge-keepalive";
 const CONNECT_TIMEOUT_MS = 25000;
 const MAX_ERROR_BODY = 65536;
@@ -42,6 +43,9 @@ const activePerOrigin = new Map();
 /** @type {chrome.runtime.Port|null} */
 let offscreenPort = null;
 let offscreenReady = false;
+// Safari (and other non-Chrome browsers) do not expose chrome.offscreen.
+let offscreenUnavailable = false;
+let offscreenWarned = false;
 /** @type {Promise<chrome.runtime.Port>|null} */
 let offscreenEnsurePromise = null;
 /** @type {Array<{resolve: Function, reject: Function, timer: any}>} */
@@ -224,6 +228,9 @@ function resolveOffscreenWaiters(port) {
 }
 
 function ensureOffscreenPort() {
+  if (offscreenUnavailable) {
+    return Promise.reject(new Error("Offscreen documents are unavailable in this browser."));
+  }
   if (offscreenPort) {
     if (offscreenReady) {
       return Promise.resolve(offscreenPort);
@@ -318,6 +325,10 @@ async function ensureOffscreenDocument() {
 }
 
 function createOffscreenDocument() {
+  if (!chrome.offscreen?.createDocument) {
+    offscreenUnavailable = true;
+    return Promise.reject(new Error("chrome.offscreen is not available in this browser."));
+  }
   // Chrome has no "network" reason. WORKERS is the closest documented
   // long-lived reason; this document performs the actual fetch/stream work.
   return chrome.offscreen.createDocument({
@@ -470,6 +481,11 @@ chrome.runtime.onConnectExternal.addListener((port) => {
 // Trusted extension pages (options/debug harness) may use the same protocol.
 // Web pages must still pass the runtime Origin allowlist above.
 chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === RELAY_PORT_NAME) {
+    handleRelayConnect(port);
+    return;
+  }
+
   if (port.name !== PORT_NAME) {
     return;
   }
@@ -491,6 +507,54 @@ chrome.runtime.onConnect.addListener((port) => {
 
   attachBridgePort(port, expectedOrigin);
 });
+
+// Content scripts relay Safari web pages through an internal port. They are
+// identified by sender.id, but the page origin must still pass the runtime
+// allowlist — the relay is not an authorization bypass.
+const pendingRelayPorts = new Set();
+
+function handleRelayConnect(port) {
+  const sender = port.sender;
+  if (!sender || sender.id !== chrome.runtime.id) {
+    port.disconnect();
+    return;
+  }
+  if (!sender.url || !/^https?:\/\//.test(sender.url)) {
+    port.disconnect();
+    return;
+  }
+  if (portStates.size + pendingRelayPorts.size >= MAX_EXTERNAL_PORTS) {
+    port.disconnect();
+    return;
+  }
+
+  pendingRelayPorts.add(port);
+  port.onDisconnect.addListener(() => {
+    pendingRelayPorts.delete(port);
+  });
+
+  void (async () => {
+    const validation = await validatePortOrigin(port).catch(() => ({ ok: false }));
+    if (!pendingRelayPorts.has(port)) {
+      return;
+    }
+    pendingRelayPorts.delete(port);
+
+    if (!validation.ok) {
+      sendToPort(port, {
+        type: "fatal",
+        error: {
+          code: "ORIGIN_DENIED",
+          message: "This origin is not allowed. Add it to the extension options first."
+        }
+      });
+      port.disconnect();
+      return;
+    }
+
+    attachBridgePort(port, validation.origin);
+  })();
+}
 
 function attachBridgePort(port, origin) {
   if (portStates.has(port)) {
@@ -540,23 +604,33 @@ async function validatePortOrigin(port) {
     return { ok: false };
   }
 
-  const origin = sender.origin;
+  let origin = sender.origin;
   if (typeof origin !== "string" || !origin || origin === "null") {
-    return { ok: false };
-  }
-  if (!/^https?:\/\//.test(origin)) {
+    // Some Safari versions leave sender.origin empty for content-script
+    // ports. sender.url is browser-provided, so deriving the origin from it
+    // is equivalent; a page cannot spoof either field.
+    origin = null;
+  } else if (!/^https?:\/\//.test(origin)) {
     return { ok: false };
   }
 
+  let urlOrigin = null;
   if (sender.url) {
     try {
-      const urlOrigin = new URL(sender.url).origin;
-      if (urlOrigin !== origin) {
-        return { ok: false };
-      }
+      urlOrigin = new URL(sender.url).origin;
     } catch {
       return { ok: false };
     }
+  }
+
+  if (!origin) {
+    origin = urlOrigin;
+  }
+  if (!origin || !/^https?:\/\//.test(origin)) {
+    return { ok: false };
+  }
+  if (urlOrigin && urlOrigin !== origin) {
+    return { ok: false };
   }
 
   const settings = await getSettings();
@@ -824,10 +898,13 @@ async function runViaOffscreen({ port, request, requestId, api, body, sessionId,
   try {
     offscreen = await ensureOffscreenPort();
   } catch (error) {
-    console.warn(
-      "[OpenCode Bridge] Offscreen stream executor unavailable; falling back to the service worker:",
-      error?.message || error
-    );
+    if (!offscreenWarned) {
+      offscreenWarned = true;
+      console.warn(
+        "[OpenCode Bridge] Offscreen stream executor unavailable; falling back to the service worker:",
+        error?.message || error
+      );
+    }
     return false;
   }
 

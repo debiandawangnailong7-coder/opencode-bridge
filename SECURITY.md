@@ -16,20 +16,31 @@ claim that the extension is suitable for high-security environments.
 
 ## Origin validation
 
-`externally_connectable.matches` is static in the manifest. This build uses
-`http://*/*` and `https://*/*`, so any http/https page can obtain the
-`chrome.runtime.connect` entry point. That is only an entry point: every port is
-validated against the runtime allowlist.
+There are two entry points, both gated by the same runtime allowlist:
 
-Validation rules:
+1. `externally_connectable.matches` (`http://*/*`, `https://*/*`) lets any
+   http/https page call `chrome.runtime.connect(extensionId)`. Ports arrive on
+   `onConnectExternal`.
+2. A content script (`content/relay.js`) is injected on http/https pages and
+   relays `window.postMessage` envelopes to an internal port named
+   `opencode-bridge-relay`. Ports from content scripts arrive on `onConnect`.
 
-- Read `port.sender.origin`.
-- Reject missing, empty, `null`, or non-http(s) origins.
-- If `port.sender.url` is present, parse it and require its origin to equal
-  `sender.origin`.
-- Require an exact string match against `allowedOrigins`.
-- No prefix matching, wildcard matching, or subdomain matching.
-- Default `allowedOrigins` is an empty array.
+Neither entry point is authorization. For both, the service worker:
+
+- requires `sender.id` to be this extension (entry point 2);
+- reads `port.sender.origin`;
+- rejects missing, empty, `null`, or non-http(s) origins; if `origin` is absent
+  (some Safari content-script ports), derives it from the browser-provided
+  `sender.url` instead — a page cannot spoof either field;
+- if `port.sender.url` is present, parses it and requires its origin to equal
+  `sender.origin`;
+- requires an exact string match against `allowedOrigins`;
+- applies no prefix matching, wildcard matching, or subdomain matching;
+- defaults `allowedOrigins` to an empty array.
+
+For the relay, the page origin is `sender.origin` — the origin of the page that
+injected the content script — so a relay port cannot bypass the allowlist.
+Denied relay ports receive the same `fatal / ORIGIN_DENIED` and are disconnected.
 
 Consequences:
 
@@ -50,12 +61,34 @@ the saved key. The service worker still checks `sender.id` and requires
 Web pages never use this internal path; they go through
 `onConnectExternal` and the runtime Origin allowlist described above.
 
+## Content-script relay
+
+`content/relay.js` exists so Safari web pages, which cannot reliably use the
+direct `externally_connectable` channel, can still reach the extension.
+
+- It runs in the extension's isolated content-script world, holds no API key,
+  never reads `chrome.storage`, and makes no origin-policy decisions.
+- It accepts `window.postMessage` envelopes only when
+  `event.source === window` and `event.origin === location.origin`, and only
+  forwards payloads for a `portId` the page opened. A subframe, another window,
+  or another origin cannot inject messages into an existing port.
+- It forwards the page's logical port to the service worker; the service worker
+  then validates `sender.origin` / `sender.url` against the allowlist exactly as
+  it does for `onConnectExternal`.
+- A malicious page on a *non-allowed* origin therefore gets
+  `ORIGIN_DENIED`; a malicious page on an *allowed* origin is already trusted
+  at origin level (see the consequence above).
+- Because content scripts are injected on all http/https pages, the injection
+  surface is broad, but the relay itself cannot read credentials or storage and
+  is not an authorization bypass. `chrome.storage.local.setAccessLevel({
+  accessLevel: "TRUSTED_CONTEXTS" })` blocks content-script reads of the key.
+
 ## API key handling
 
 - The key is stored in `chrome.storage.local`.
 - `chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })` is
-  called on install/startup to prevent content scripts from reading it. This
-  build does not use content scripts, but the call is kept as defense in depth.
+  called on install/startup so the content-script relay cannot read it. This is
+  defense in depth: the relay never attempts storage access.
 - The key is never sent to a web page, the SDK, a log, an error message, a URL,
   a query string, or a DNR rule.
 - The key is read from storage for each upstream request and placed only in the
@@ -185,6 +218,7 @@ non-streaming) run in an **offscreen document**:
 If this extension is published, expect review of:
 
 - broad `externally_connectable` matches;
+- a content script declared for all http/https pages;
 - `optional_host_permissions` for custom base URLs;
 - `declarativeNetRequest` header modification;
 - the `offscreen` permission and the `WORKERS` justification;

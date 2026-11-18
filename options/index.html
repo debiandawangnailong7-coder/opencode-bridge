@@ -123,9 +123,44 @@
         <button id="copyExtensionId" class="button button-ghost" type="button">Copy extension ID</button>
         <p class="hint">
           Use this ID with <code>new OpenCodeBridge({ extensionId })</code> in your
-          web app. For unpacked builds, keep the extension installed at a stable
-          path or add a <code>key</code> to <code>manifest.json</code>.
+          web app. In Safari this value is the extension's bundle identifier, not a
+          Chrome-style hash. For unpacked Chrome builds, keep the extension
+          installed at a stable path or add a <code>key</code> to
+          <code>manifest.json</code>.
         </p>
+      </section>
+
+      <section class="card">
+        <h2>Connection transports</h2>
+        <p class="hint" id="transportStatus">—</p>
+        <ul class="hint">
+          <li>
+            <strong>Direct</strong> — web pages connect through
+            <code>externally_connectable</code>. Chrome's primary path.
+          </li>
+          <li>
+            <strong>Content-script relay</strong> — the SDK posts messages to a
+            content script, which forwards them over a privileged port. Safari
+            uses this path; Chrome falls back to it automatically.
+          </li>
+        </ul>
+        <div id="safariNote" hidden>
+          <p class="hint">
+            Safari requires per-website access: <strong>Safari Settings →
+            Extensions → OpenCode Bridge → Website Access</strong>, then allow the
+            site that runs the SDK (for local development, allow
+            <code>localhost</code> or choose "Always Allow on Every Website").
+            Reload the page after changing access.
+          </p>
+          <p class="hint">
+            For development builds, enable
+            <strong>Safari → Settings → Advanced → Show features for web
+            developers</strong>, then <strong>Develop → Allow Unsigned
+            Extensions</strong>. Safari 16.4+ is recommended (full MV3 service
+            worker support); older versions may need the converter's
+            background-page fallback.
+          </p>
+        </div>
       </section>
 
       <footer class="actions">

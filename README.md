@@ -1,7 +1,7 @@
 # OpenCode Bridge
 
-一个本地运行的 Chrome Extension（Manifest V3），为静态网页 / browser coding agent
-提供到 OpenCode Console 与 OpenCode Go 推理 API 的薄传输层。
+一个本地运行的浏览器扩展（Chrome / Safari，Manifest V3），为静态网页 /
+browser coding agent 提供到 OpenCode Console 与 OpenCode Go 推理 API 的薄传输层。
 
 它只做四件事：
 
@@ -92,6 +92,36 @@ Go:      https://opencode.ai/inference/go/openai/v1/chat/completions
 
 ---
 
+## 安装（Safari）
+
+需要 Safari 16.4+（完整支持 MV3 service worker；更早版本的 MV3 支持不完整，可能需要
+按转换器提示改用非持久 background page）。
+
+1. 用 Apple 官方转换器生成 Xcode 工程：
+
+   ```bash
+   xcrun safari-web-extension-converter /path/to/opencodeGoBrigde
+   ```
+
+2. 在 Xcode 中选择你的签名 team（免费个人 team 即可），运行一次包含 App。
+3. Safari → 设置 → 高级 → 勾选「显示网页开发者功能」。
+4. Safari → 开发 → 勾选「允许未签名的扩展」（开发构建每次重开 Safari 后可能需要重勾）。
+5. Safari → 设置 → 扩展 → 启用 OpenCode Bridge。
+6. 关键：Safari 需要**按站点授权**。打开扩展的 Website Access（Safari → 设置 →
+   扩展 → OpenCode Bridge），允许运行 SDK 的站点；本地开发可允许 `localhost`，
+   或选择「在所有网站上始终允许」。改完访问权限后**刷新页面**。
+
+Safari 下设置页显示的 Extension ID 是扩展的 **bundle identifier**（例如
+`com.example.OpenCodeBridge.Extension`），不是 Chrome 的 32 位 ID；它也不能通过
+manifest 的 `key` 固定，ID 由 Xcode 工程里的 bundle identifier 决定。SDK 会优先尝试
+直连，失败后自动改用 content script 中继（见下文）。
+
+Safari 没有 `chrome.offscreen`，因此推理请求回退到 Service Worker fetch，受 25 秒
+首字节 / 5 分钟单请求计时约束。DNR User-Agent 规则在 Safari 上的支持度取决于版本；
+不支持时规则会被跳过，是否实际发送自定义 UA 请以抓包为准。
+
+---
+
 ## 配置
 
 ### Provider
@@ -150,9 +180,9 @@ http://localhost:8000
 - 必须包含 scheme + host + port；不能带 path / query / hash。
 - 非 localhost 的 `http://` 会被拒绝。
 - 当前 manifest 使用 `externally_connectable.matches: ["http://*/*", "https://*/*"]`，
-  因此所有 http/https 页面都能拿到 `chrome.runtime` 接口；实际访问控制完全依赖这里
-  的 Origin 白名单。若你希望更小的暴露面，应改为 content script +
-  `optional_host_permissions` 方案。
+  并且对所有 http/https 页面注入了轻量 content script relay。两者都只是“入口”：
+  content script 不读 storage、不持有 key、不理解业务，实际访问控制完全依赖这里的
+  Origin 白名单，Service Worker 会在直连和 relay 两条路径上做同样的校验。
 
 ---
 
@@ -183,6 +213,30 @@ SDK 文件：`sdk/opencode-bridge.js`。它是 ES module，并同时把
   }
 </script>
 ```
+
+### 传输选择（Chrome / Safari）
+
+SDK 默认 `transport: "auto"`：
+
+1. 先尝试直连（`externally_connectable`，Chrome 的主路径，部分 Safari 版本也可用），
+   探针默认 1.5 秒；
+2. 直连握手失败时，自动回退到 **content script 中继**：页面用 `window.postMessage`
+   与扩展的 content script 通信，content script 再通过内部 runtime port 连接
+   Service Worker。Safari 网页走这条路径。
+
+```js
+const bridge = new OpenCodeBridge({
+  extensionId: "com.example.OpenCodeBridge.Extension", // Safari 下是 bundle ID
+  transport: "auto" // "auto" | "direct" | "relay"
+});
+
+await bridge.connect();
+console.log(bridge.transport); // "direct" 或 "relay"
+```
+
+中继路径仍要求页面 Origin 在扩展的 Allowed origins 中；Safari 还要求先在
+Website Access 中允许该站点。失败时错误码包括 `CONTENT_SCRIPT_MISSING`（content
+script 未注入 / 站点未授权）和 `NO_BRIDGE_TRANSPORT`（既无 runtime 也无法中继）。
 
 ### 非流式
 
@@ -342,6 +396,13 @@ python3 -m http.server 8000
 `sender.url` 都属于本扩展的 context。网页仍然走
 `onConnectExternal` + Origin 白名单，不会因为内部路径而放宽。
 
+Safari 等无法直连的网页走 content script 中继：页面与 `content/relay.js` 之间使用
+`window.postMessage` 信封（`{ __opencodeBridge: 1, kind: "open"|"msg"|"close",
+portId, seq, payload }`），relay 再用内部 port 名 `opencode-bridge-relay` 连接
+Service Worker。中继不改变上面任何消息语义；Service Worker 对中继 port 同样执行
+`validatePortOrigin`（`sender.origin` 必须匹配白名单，且与 `sender.url` 的 origin
+一致）。
+
 ---
 
 ## 安全设计
@@ -355,8 +416,9 @@ python3 -m http.server 8000
 - **日志**：不记录 key、prompt、response body；只可能记录非敏感的配置错误。
 - **CORS**：扩展后台带 host permission 的 fetch 不走普通网页 CORS；不修改
   `Access-Control-Allow-Origin`，不要求关闭浏览器安全策略。
-- **内容脚本**：本项目不使用 content script；因此 content script 默认能读
-  `storage.local` 的问题不适用，但仍调用了 `setAccessLevel` 作为纵深防御。
+- **内容脚本**：`content/relay.js` 只做消息转发（`window.postMessage` ↔ 内部 port），
+  不读 `storage.local`、不持有 key、不做 Origin 判定；`setAccessLevel("TRUSTED_CONTEXTS")`
+  仍然阻止它读取保存的凭据。两条传输路径的访问控制都在 Service Worker。
 
 详见 [SECURITY.md](SECURITY.md)。
 
@@ -416,6 +478,10 @@ Page SDK
    未来兼容性。
 6. **API key 存储**：`storage.local` 不是硬件级密钥存储；本机恶意软件、拥有本地
    文件访问权限的程序仍可能读取。
+7. **Safari**：网页到扩展使用 content script 中继，必须先按站点授权 Website Access；
+   没有 offscreen，长流依赖 Service Worker（25 秒首字节 / 5 分钟单请求）；Safari
+   回收 Service Worker 时活动流会以 `SW_DISCONNECTED` / `RELAY_CLOSED` 失败，不能
+   续传。Safari 16.4 以下对 MV3 service worker 支持不完整，建议使用 16.4+。
 
 ---
 
@@ -439,6 +505,7 @@ CHROME_BIN=/usr/lib/chromium/chromium npm run test:browser
 
 - options/storage/DNR/offscreen 创建；
 - 内部可信端口 + stubbed offscreen fetch 的流式/非流式/Responses/Anthropic Messages/错误/取消；
+- content script 中继路径（本地 HTTP 页面 + relay 端口，含未授权 Origin 拒绝）；
 - 首字节延迟（`--first-byte`）和 6 分钟长流（`--long`）；
 - offscreen 中途关闭、重建恢复、Service Worker 中途停止。
 
@@ -452,6 +519,7 @@ CHROME_BIN=/usr/lib/chromium/chromium npm run test:browser
 ```text
 manifest.json
 background/service-worker.js
+content/relay.js
 offscreen/offscreen.html
 offscreen/offscreen.js
 lib/validation.js
