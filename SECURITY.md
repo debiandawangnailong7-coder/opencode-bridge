@@ -122,9 +122,13 @@ The extension rejects:
   `max_tokens`, invalid `system` (not string/content-block array), or
   non-array `tools`;
 - invalid request IDs or session IDs;
-- bodies larger than `maxBodyBytes` (default 4 MiB);
+- bodies larger than `maxBodyBytes` (default 32 MiB, configurable in options);
 - duplicate request IDs on the same port;
 - requests over the global/per-origin concurrency limits.
+
+`messages` / `content` / `input` below the top level are opaque JSON. The
+extension does not validate, rewrite, or strip content parts; the upstream API
+and model decide whether they are accepted.
 
 The page cannot provide:
 

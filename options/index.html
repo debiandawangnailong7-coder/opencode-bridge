@@ -17,7 +17,7 @@
             never receives your API key.
           </p>
         </div>
-        <span class="version">v0.1.0</span>
+        <span class="version" id="extensionVersion">—</span>
       </header>
 
       <section class="card">
@@ -113,6 +113,26 @@
           <small>
             One exact origin per line. Scheme, host, and port must match. Paths,
             queries, hashes, and wildcards are rejected. Default: no page can connect.
+          </small>
+        </label>
+      </section>
+
+      <section class="card">
+        <h2>Request limits</h2>
+        <label class="field">
+          <span>Maximum request body (MiB)</span>
+          <input
+            id="maxBodyMiB"
+            type="number"
+            min="1"
+            max="32"
+            step="1"
+            inputmode="numeric"
+          >
+          <small>
+            Larger JSON bodies are rejected with BODY_TOO_LARGE. Default: 32 MiB.
+            Base64 images are about 1.33× their binary size; prefer HTTPS image
+            URLs when possible. The bridge caps this setting at 32 MiB.
           </small>
         </label>
       </section>

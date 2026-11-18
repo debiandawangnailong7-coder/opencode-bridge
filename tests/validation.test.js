@@ -3,13 +3,18 @@ import assert from "node:assert/strict";
 import {
   buildEndpoints,
   byteLength,
+  DEFAULT_MAX_BODY_BYTES,
   endpointFor,
   isForbiddenCustomHost,
   isOriginAllowed,
   isValidRequestId,
   isValidSessionId,
+  MAX_MAX_BODY_BYTES,
+  MIB,
+  MIN_MAX_BODY_BYTES,
   normalizeOrigin,
   parseBaseUrl,
+  parseMaxBodyMiB,
   providerBaseUrl,
   sanitizeResponseHeaders,
   truncateText,
@@ -236,6 +241,62 @@ test("rejects missing models and non-boolean stream", () => {
     model: "kimi-k3",
     stream: "yes"
   }).ok, false);
+});
+
+test("parses request body limits in MiB", () => {
+  assert.deepEqual(parseMaxBodyMiB("1"), { ok: true, bytes: MIN_MAX_BODY_BYTES });
+  assert.deepEqual(parseMaxBodyMiB("32"), { ok: true, bytes: MAX_MAX_BODY_BYTES });
+  assert.equal(DEFAULT_MAX_BODY_BYTES, MAX_MAX_BODY_BYTES);
+  assert.equal(MAX_MAX_BODY_BYTES / MIB, 32);
+
+  for (const value of ["0", "33", "1.5", "abc", "", null, undefined, "NaN"]) {
+    assert.equal(parseMaxBodyMiB(value).ok, false, String(value));
+  }
+});
+
+test("passes multimodal content parts through unchanged", () => {
+  const chatBody = {
+    model: "gpt-6-luna",
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: "What is in this image?" },
+        { type: "image_url", image_url: { url: "https://example.com/cat.png" } }
+      ]
+    }]
+  };
+  const chatSnapshot = structuredClone(chatBody);
+  assert.equal(validateRequestBody("chat.completions", chatBody).ok, true);
+  assert.deepEqual(chatBody, chatSnapshot);
+
+  const anthropicBody = {
+    model: "claude-haiku-5-5",
+    max_tokens: 256,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+        { type: "text", text: "Describe this." }
+      ]
+    }]
+  };
+  const anthropicSnapshot = structuredClone(anthropicBody);
+  assert.equal(validateRequestBody("anthropic.messages", anthropicBody).ok, true);
+  assert.deepEqual(anthropicBody, anthropicSnapshot);
+
+  const responsesBody = {
+    model: "gpt-6-luna",
+    input: [{
+      role: "user",
+      content: [
+        { type: "input_text", text: "Describe this." },
+        { type: "input_image", image_url: "https://example.com/cat.png" }
+      ]
+    }]
+  };
+  const responsesSnapshot = structuredClone(responsesBody);
+  assert.equal(validateRequestBody("responses", responsesBody).ok, true);
+  assert.deepEqual(responsesBody, responsesSnapshot);
 });
 
 test("rejects a body for models.list", () => {

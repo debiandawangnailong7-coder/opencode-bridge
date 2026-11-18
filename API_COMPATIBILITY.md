@@ -56,11 +56,13 @@ action: modifyHeaders -> user-agent: set <configured value>
 Default:
 
 ```text
-opencode-bridge/0.1.0
+opencode-bridge/0.2.0
 ```
 
-The value is configurable in the options page. Do not configure a value that
-impersonates Claude Code, Codex, OpenCode, or another validated client.
+The default is derived from `chrome.runtime.getManifest().version`. Existing
+users keep their saved value. The value is configurable in the options page. Do
+not configure a value that impersonates Claude Code, Codex, OpenCode, or another
+validated client.
 
 > `tabIds: [-1]` is documented as `TAB_ID_NONE`, matching requests that do not
 > originate from a tab. The rule therefore targets non-tab requests to the
@@ -138,6 +140,24 @@ Anthropic Messages is supported through `/anthropic/v1/messages`. Gemini's
 `:generateContent` / `:streamGenerateContent` path is not exposed by this MVP.
 Text models that use another native API can also be called through the
 OpenAI-shaped endpoints, where OpenCode translates the request.
+
+### Multimodal content
+
+The bridge does not inspect `messages`, `content`, or `input` below the top
+level. Content arrays and individual parts are forwarded unchanged:
+
+- Chat Completions: `image_url`, `input_audio`, `file`, and other parts.
+- Anthropic Messages: `image` with `source`, `document`, `tool_result`, etc.
+- Responses: `input_image`, `input_file`, `input_audio`, etc.
+
+These are examples, not an allowlist. The bridge does not translate parts
+between API shapes and does not check model capabilities; the upstream API and
+the selected model decide whether a part is accepted.
+
+The body must be valid JSON. Binary data must be base64-encoded or referenced by
+URL; `FormData` and raw binary uploads are not supported. The default maximum
+body is 32 MiB and is configurable in the options page (1–32 MiB). Prefer HTTPS
+image URLs for large images. A body over the limit returns `BODY_TOO_LARGE`.
 
 ## Streaming
 
@@ -246,6 +266,7 @@ and the official OpenCode privacy documentation.
 | Responses, stream | Responses event types forwarded |
 | Anthropic Messages, non-stream | JSON body with `type: "message"` |
 | Anthropic Messages, stream | `event:` frames forwarded; ends on stream close, no `[DONE]` required |
+| Multimodal content parts | Forwarded unchanged; upstream/model decides |
 | Chat Completions request to Claude/Gemini model | Console translates or returns documented error |
 | Invalid model ID | Upstream 4xx forwarded |
 | No API key | `AUTH_MISSING` |
@@ -258,7 +279,7 @@ and the official OpenCode privacy documentation.
 | Long stream | Runs in offscreen document; SW only routes; not bound by the SW 5-minute request timer |
 | Disallowed origin | `ORIGIN_DENIED` / fatal |
 | Redirect to another host | `UNEXPECTED_REDIRECT` / fetch error |
-| Body over 4 MiB | `BODY_TOO_LARGE` |
+| Body over configured limit (default 32 MiB) | `BODY_TOO_LARGE` |
 | Session ID missing | Bridge generates one; SDK normally supplies it |
 
 ## Official references

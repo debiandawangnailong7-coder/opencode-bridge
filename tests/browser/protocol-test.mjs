@@ -51,6 +51,14 @@ await options.waitFor(async () => {
   return text.includes("saved");
 }, 5000);
 
+const optionsInfo = await options.evaluate(`({
+  version: document.getElementById('extensionVersion').textContent,
+  expected: 'v' + chrome.runtime.getManifest().version,
+  maxBodyMiB: document.getElementById('maxBodyMiB').value
+})`);
+check("options version matches manifest", optionsInfo.version === optionsInfo.expected, JSON.stringify(optionsInfo));
+check("options default body limit", optionsInfo.maxBodyMiB === "32", JSON.stringify(optionsInfo));
+
 let dnrRules = [];
 await swCdp.waitFor(async () => {
   dnrRules = await swCdp.evaluate("chrome.declarativeNetRequest.getSessionRules()");

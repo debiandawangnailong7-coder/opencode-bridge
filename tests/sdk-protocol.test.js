@@ -159,6 +159,28 @@ test("returns a non-stream response with parsed JSON", async () => {
   bridge.close();
 });
 
+test("forwards multimodal content arrays unchanged", async () => {
+  const fake = installFakeExtension("response");
+  const bridge = new OpenCodeBridge({ extensionId: "test-extension" });
+  const conversation = bridge.createConversation();
+  const body = {
+    model: "gpt-6-luna",
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: "What is in this image?" },
+        { type: "image_url", image_url: { url: "https://example.com/cat.png" } }
+      ]
+    }],
+    stream: false
+  };
+
+  await conversation.chat.completions.create(body);
+
+  assert.deepEqual(fake.requests[0].body, body);
+  bridge.close();
+});
+
 test("rejects with upstream error details", async () => {
   installFakeExtension("error");
   const bridge = new OpenCodeBridge({ extensionId: "test-extension" });

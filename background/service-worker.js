@@ -1,6 +1,7 @@
 import {
   buildEndpoints,
   byteLength,
+  DEFAULT_MAX_BODY_BYTES,
   endpointFor,
   isOriginAllowed,
   isValidRequestId,
@@ -22,14 +23,15 @@ const MAX_EXTERNAL_PORTS = 32;
 const ANTHROPIC_VERSION = "2023-06-01";
 const OFFSCREEN_PORT_NAME = "opencode-offscreen";
 const OFFSCREEN_CONNECT_TIMEOUT_MS = 5000;
+const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 
 const DEFAULTS = {
   provider: "console",
   customBaseUrl: "",
   apiKey: "",
   allowedOrigins: [],
-  clientUserAgent: "opencode-bridge/0.1.0",
-  maxBodyBytes: 4 * 1024 * 1024,
+  clientUserAgent: `opencode-bridge/${EXTENSION_VERSION}`,
+  maxBodyBytes: DEFAULT_MAX_BODY_BYTES,
   maxConcurrent: 4,
   maxPerOrigin: 2
 };
@@ -775,7 +777,7 @@ async function handleRequest(port, state, message) {
   }
 
   if (bodySize > settings.maxBodyBytes) {
-    sendError(port, requestId, "BODY_TOO_LARGE", `Request body exceeds ${settings.maxBodyBytes} bytes.`);
+    sendError(port, requestId, "BODY_TOO_LARGE", `Request body exceeds the configured limit (${settings.maxBodyBytes} bytes).`);
     return;
   }
 

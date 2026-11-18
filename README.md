@@ -144,8 +144,11 @@ Chrome 会静默丢弃 `fetch` 里设置的 `User-Agent`，所以扩展使用
 `declarativeNetRequest` 的 `modifyHeaders` 设置它。默认值：
 
 ```text
-opencode-bridge/0.1.0
+opencode-bridge/0.2.0
 ```
+
+默认值由 `chrome.runtime.getManifest().version` 生成；升级扩展后，未保存过该设置的
+用户会自动使用新版本号，已保存的值不会被覆盖。
 
 如果你在做 browser coding agent，可以改成自己的产品名和版本，例如：
 
@@ -183,6 +186,12 @@ http://localhost:8000
   并且对所有 http/https 页面注入了轻量 content script relay。两者都只是“入口”：
   content script 不读 storage、不持有 key、不理解业务，实际访问控制完全依赖这里的
   Origin 白名单，Service Worker 会在直连和 relay 两条路径上做同样的校验。
+
+### Request limits
+
+`Maximum request body (MiB)` 控制桥接接受的 JSON body 上限，默认 32 MiB，可在
+1–32 MiB 之间调整。超过上限会返回 `BODY_TOO_LARGE`。这个设置只影响桥接层，不改变
+上游的限制。base64 图片约为原始二进制的 1.33 倍，优先使用 HTTPS 图片 URL。
 
 ---
 
@@ -280,8 +289,71 @@ for await (const event of stream) {
 }
 ```
 
-第一版是文本传输；`system` 支持字符串或 Anthropic content-block 数组，`tools` 原样透传。
+传输层不解析 `content` 里的每个 part：字符串和 content-block 数组都原样透传（包括
+`image_url`、Anthropic `image`/`source`、Responses `input_image` 等）；桥接不做
+OpenAI ↔ Anthropic 转换，也不判断模型是否支持某种模态，这些由 OpenCode Console 和
+上游模型决定。`system` 支持字符串或 Anthropic content-block 数组，`tools` 原样透传。
 Anthropic 流不以 `[DONE]` 结束，SDK 在流关闭时正常结束迭代。
+
+### 多模态输入
+
+桥接层是 JSON 透传，不解析、不裁剪、不改写 `content` / `input` 里的 part。图片、音频、
+PDF 等能否使用由上游模型决定；桥接不做跨 API 的 part 转换，请使用目标端点原生的形状。
+
+Chat Completions（图片 URL）：
+
+```js
+await conversation.chat.completions.create({
+  model: "gpt-6-luna",
+  messages: [{
+    role: "user",
+    content: [
+      { type: "text", text: "What is in this image?" },
+      { type: "image_url", image_url: { url: "https://example.com/cat.png" } }
+    ]
+  }],
+  stream: false
+});
+```
+
+Anthropic Messages（base64 图片）：
+
+```js
+await conversation.messages.create({
+  model: "claude-haiku-5-5",
+  max_tokens: 256,
+  messages: [{
+    role: "user",
+    content: [
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "..." } },
+      { type: "text", text: "Describe this." }
+    ]
+  }],
+  stream: false
+});
+```
+
+Responses（`input_image`）：
+
+```js
+await conversation.responses.create({
+  model: "gpt-6-luna",
+  input: [{
+    role: "user",
+    content: [
+      { type: "input_text", text: "Describe this." },
+      { type: "input_image", image_url: "https://example.com/cat.png" }
+    ]
+  }],
+  stream: false
+});
+```
+
+注意：
+
+- 只支持 JSON；二进制必须 base64 或 URL，不能直接传 `FormData` / Blob。
+- 默认请求体上限 32 MiB，可在 options 调整；大图优先用 URL。
+- 上游模型不支持该模态时会返回上游错误；桥接不会替你换模型。
 
 ### Session ID
 
@@ -411,8 +483,9 @@ Service Worker。中继不改变上面任何消息语义；Service Worker 对中
 - **Key**：`storage.local` + `setAccessLevel("TRUSTED_CONTEXTS")`；不使用 sync。
 - **请求**：只接受 `api`、`requestId`、`body`、`sessionId`；拒绝任意 URL/header。
 - **网络**：`redirect: "error"`；校验最终 `response.url` 的 origin；自定义 base 拒绝私网。
-- **限制**：请求体默认 4 MiB；响应/流默认 32 MiB；全局并发 4，每 origin 并发 2；
-  超出直接返回错误。
+- **限制**：请求体默认 32 MiB（可在 options 调整）；响应/流默认 32 MiB；全局并发 4，
+  每 origin 并发 2；超出直接返回错误。`messages` / `content` / `input` 内部是不透明
+  JSON，桥接不解析、不裁剪 content part。
 - **日志**：不记录 key、prompt、response body；只可能记录非敏感的配置错误。
 - **CORS**：扩展后台带 host permission 的 fetch 不走普通网页 CORS；不修改
   `Access-Control-Allow-Origin`，不要求关闭浏览器安全策略。
@@ -482,6 +555,8 @@ Page SDK
    没有 offscreen，长流依赖 Service Worker（25 秒首字节 / 5 分钟单请求）；Safari
    回收 Service Worker 时活动流会以 `SW_DISCONNECTED` / `RELAY_CLOSED` 失败，不能
    续传。Safari 16.4 以下对 MV3 service worker 支持不完整，建议使用 16.4+。
+8. **多模态**：桥接只做 JSON 透传，不转换 content part，也不支持二进制 / `FormData`
+   上传；能使用哪些模态由上游模型决定。默认请求体上限 32 MiB，大文件优先用 URL。
 
 ---
 

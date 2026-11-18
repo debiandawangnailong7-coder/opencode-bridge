@@ -1,11 +1,18 @@
 import {
+  DEFAULT_MAX_BODY_BYTES,
   isForbiddenCustomHost,
+  MAX_MAX_BODY_BYTES,
+  MIB,
+  MIN_MAX_BODY_BYTES,
   normalizeOrigin,
   parseBaseUrl,
+  parseMaxBodyMiB,
   providerBaseUrl
 } from "../lib/validation.js";
 
 const $ = (id) => document.getElementById(id);
+const manifest = chrome.runtime.getManifest();
+const DEFAULT_USER_AGENT = `opencode-bridge/${manifest.version}`;
 
 let current = {};
 
@@ -18,11 +25,16 @@ async function init() {
 
   $("provider").value = current.provider || "console";
   $("customBaseUrl").value = current.customBaseUrl || "";
-  $("clientUserAgent").value = current.clientUserAgent || "opencode-bridge/0.1.0";
+  $("clientUserAgent").value = current.clientUserAgent || DEFAULT_USER_AGENT;
   $("allowedOrigins").value = Array.isArray(current.allowedOrigins)
     ? current.allowedOrigins.join("\n")
     : "";
   $("extensionId").textContent = chrome.runtime.id;
+  $("extensionVersion").textContent = "v" + manifest.version;
+  $("maxBodyMiB").min = String(MIN_MAX_BODY_BYTES / MIB);
+  $("maxBodyMiB").max = String(MAX_MAX_BODY_BYTES / MIB);
+  const storedBytes = Number(current.maxBodyBytes) || DEFAULT_MAX_BODY_BYTES;
+  $("maxBodyMiB").value = String(Math.round(storedBytes / MIB));
   $("apiKey").value = "";
   updateKeyPlaceholder();
   showTransportInfo();
@@ -153,6 +165,12 @@ async function save() {
     return;
   }
 
+  const parsedLimit = parseMaxBodyMiB($("maxBodyMiB").value);
+  if (!parsedLimit.ok) {
+    setStatus(parsedLimit.error, true);
+    return;
+  }
+
   const newKey = $("apiKey").value.trim();
   if (newKey && (/[\r\n]/.test(newKey) || newKey.length > 512)) {
     setStatus("API key must be a single line of at most 512 characters.", true);
@@ -163,7 +181,8 @@ async function save() {
     provider,
     customBaseUrl: provider === "custom" ? resolvedBaseUrl : "",
     allowedOrigins,
-    clientUserAgent: userAgent
+    clientUserAgent: userAgent,
+    maxBodyBytes: parsedLimit.bytes
   };
   if (newKey) {
     update.apiKey = newKey;

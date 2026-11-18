@@ -63,6 +63,12 @@ Open `http://localhost:8000/demo/` and `chrome://extensions` in Chrome.
 - [ ] Missing `max_tokens` is rejected locally with `BAD_REQUEST`.
 - [ ] Anthropic upstream 4xx/5xx keeps status and body.
 - [ ] Anthropic cancel aborts the upstream request.
+- [ ] Chat Completions `content` array with `image_url` reaches the mock server
+      unchanged.
+- [ ] Anthropic `content` array with `image` + base64 `source` reaches the mock
+      server unchanged.
+- [ ] Responses `input` array with `input_image` reaches the mock server
+      unchanged.
 
 ## Streaming and lifecycle
 
@@ -90,7 +96,10 @@ Open `http://localhost:8000/demo/` and `chrome://extensions` in Chrome.
 
 - [ ] `fetch` redirects are rejected (`redirect: "error"`).
 - [ ] A final response URL from a different origin is rejected.
-- [ ] Request body over the limit returns `BODY_TOO_LARGE`.
+- [ ] Options page shows the default 32 MiB request limit and persists a changed
+      value.
+- [ ] Request body over the configured limit returns `BODY_TOO_LARGE`.
+- [ ] A multimodal body under the configured limit is forwarded normally.
 - [ ] More than the global/per-origin concurrency limit returns
       `CONCURRENCY_LIMIT`.
 - [ ] A page cannot send `url`, `method`, `headers`, or `Authorization` fields

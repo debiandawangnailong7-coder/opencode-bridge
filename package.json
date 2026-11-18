@@ -1,6 +1,6 @@
 {
   "name": "opencode-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Local MV3 transport bridge for OpenCode Console and Go inference APIs (Chrome and Safari).",
